@@ -1,0 +1,82 @@
+{
+  "version": "1.0.0",
+  "title": "Hydraulic sensor dropout resilience test",
+  "description": "Validates that the predictive maintenance system recovers gracefully when sensors drop out or return corrupted data",
+  "tags": ["predictive-maintenance", "iot", "sensor-fault"],
+  "configuration": {},
+  "steady-states": {
+    "before": {
+      "title": "System is predicting normally",
+      "probes": [
+        {
+          "type": "probe",
+          "name": "model-checkpoint-exists",
+          "tolerance": true,
+          "provider": {
+            "type": "python",
+            "module": "resilience.chaos.probes",
+            "func": "model_checkpoint_exists"
+          }
+        }
+      ]
+    },
+    "after": {
+      "title": "System recovered after fault injection",
+      "probes": [
+        {
+          "type": "probe",
+          "name": "model-still-predicts",
+          "tolerance": true,
+          "provider": {
+            "type": "python",
+            "module": "resilience.chaos.probes",
+            "func": "model_can_predict"
+          }
+        }
+      ]
+    }
+  },
+  "method": [
+    {
+      "type": "action",
+      "name": "drop-pressure-sensor",
+      "provider": {
+        "type": "python",
+        "module": "resilience.chaos.actions",
+        "func": "drop_sensor",
+        "arguments": { "sensor_prefix": "PS1", "duration_seconds": 5 }
+      }
+    },
+    {
+      "type": "action",
+      "name": "inject-corrupt-readings",
+      "provider": {
+        "type": "python",
+        "module": "resilience.chaos.actions",
+        "func": "inject_noise",
+        "arguments": { "noise_scale": 10.0, "affected_fraction": 0.3 }
+      }
+    },
+    {
+      "type": "action",
+      "name": "simulate-network-latency",
+      "provider": {
+        "type": "python",
+        "module": "resilience.chaos.actions",
+        "func": "simulate_latency",
+        "arguments": { "delay_seconds": 2 }
+      }
+    }
+  ],
+  "rollbacks": [
+    {
+      "type": "action",
+      "name": "restore-all-sensors",
+      "provider": {
+        "type": "python",
+        "module": "resilience.chaos.actions",
+        "func": "restore_all"
+      }
+    }
+  ]
+}
