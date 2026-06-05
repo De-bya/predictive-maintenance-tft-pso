@@ -1,0 +1,169 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Segoe UI', Arial, sans-serif;
+  background: #0f172a;
+  color: #e2e8f0;
+  min-height: 100vh;
+}
+
+header {
+  background: linear-gradient(135deg, #1e3a5f, #1abc9c33);
+  border-bottom: 1px solid #1abc9c44;
+  padding: 18px 32px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+header h1 { font-size: 1.4rem; color: #1abc9c; }
+header p  { font-size: 0.85rem; color: #94a3b8; }
+
+.badge {
+  background: #1abc9c22;
+  color: #1abc9c;
+  border: 1px solid #1abc9c55;
+  border-radius: 20px;
+  padding: 3px 10px;
+  font-size: 0.75rem;
+  margin-left: auto;
+}
+
+.container { max-width: 1100px; margin: 32px auto; padding: 0 24px; }
+
+/* Stats bar */
+.stats-bar {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 28px;
+}
+
+.stat-card {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  padding: 18px;
+  text-align: center;
+  transition: border-color 0.2s;
+}
+
+.stat-card:hover { border-color: #1abc9c; }
+.stat-card .val  { font-size: 1.8rem; font-weight: 700; color: #1abc9c; }
+.stat-card .lbl  { font-size: 0.78rem; color: #64748b; margin-top: 4px; }
+
+/* Main grid */
+.main-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+
+.card {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  padding: 24px;
+}
+
+.card h2 {
+  font-size: 1rem;
+  color: #94a3b8;
+  margin-bottom: 18px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #334155;
+}
+
+label  { display: block; font-size: 0.82rem; color: #94a3b8; margin-bottom: 6px; }
+select, input[type=number] {
+  width: 100%;
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  color: #e2e8f0;
+  padding: 10px 12px;
+  font-size: 0.9rem;
+  margin-bottom: 14px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+select:focus, input:focus { border-color: #1abc9c; }
+
+.btn {
+  width: 100%;
+  background: linear-gradient(135deg, #1abc9c, #16a085);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+.btn:hover    { opacity: 0.88; }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* Result */
+.result {
+  display: none;
+  margin-top: 18px;
+  border-radius: 10px;
+  padding: 20px;
+  text-align: center;
+  border: 2px solid;
+  animation: fadeIn 0.3s ease;
+}
+@keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+.result.normal { background: #0d2e20; border-color: #1abc9c; }
+.result.fault  { background: #2e0d0d; border-color: #e74c3c; }
+
+.result .icon   { font-size: 2.5rem; }
+.result .status { font-size: 1.3rem; font-weight: 700; margin: 8px 0 4px; }
+.result .conf   { font-size: 0.85rem; color: #94a3b8; }
+
+.prob-bar { margin-top: 14px; }
+.prob-bar .row {
+  display: flex; align-items: center;
+  gap: 10px; margin-bottom: 6px; font-size: 0.8rem;
+}
+.bar-bg { flex: 1; background: #0f172a; border-radius: 4px; height: 8px; overflow: hidden; }
+.bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s ease; }
+.bar-fill.fault  { background: #e74c3c; }
+.bar-fill.normal { background: #1abc9c; }
+
+/* History */
+.history { max-height: 360px; overflow-y: auto; }
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid #1e293b;
+  font-size: 0.83rem;
+}
+.history-item:last-child { border-bottom: none; }
+.pill {
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.pill.fault  { background: #e74c3c22; color: #e74c3c; border: 1px solid #e74c3c55; }
+.pill.normal { background: #1abc9c22; color: #1abc9c; border: 1px solid #1abc9c55; }
+.history-item .ts { color: #475569; margin-left: auto; }
+
+/* Health */
+.health-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid #334155;
+  font-size: 0.85rem;
+}
+.health-row:last-child { border-bottom: none; }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+.dot.green { background: #1abc9c; box-shadow: 0 0 6px #1abc9c; }
+.dot.red   { background: #e74c3c; }

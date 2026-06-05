@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Predictive Maintenance Dashboard</title>
+  <link rel="stylesheet" href="/static/css/style.css"/>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>⚙️ Predictive Maintenance Dashboard</h1>
+    <p>TFT + PSO · Hydraulic System Fault Detection</p>
+  </div>
+  <span class="badge" id="api-status">● Connecting...</span>
+</header>
+
+<div class="container">
+
+  <!-- Stats bar -->
+  <div class="stats-bar">
+    <div class="stat-card">
+      <div class="val" id="stat-requests">0</div>
+      <div class="lbl">Total Predictions</div>
+    </div>
+    <div class="stat-card">
+      <div class="val" id="stat-faults" style="color:#e74c3c">0</div>
+      <div class="lbl">Faults Detected</div>
+    </div>
+    <div class="stat-card">
+      <div class="val" id="stat-conf">—</div>
+      <div class="lbl">Avg Confidence</div>
+    </div>
+    <div class="stat-card">
+      <div class="val" id="stat-lat">—</div>
+      <div class="lbl">Avg Latency (ms)</div>
+    </div>
+  </div>
+
+  <div class="main-grid">
+
+    <!-- Prediction panel -->
+    <div class="card">
+      <h2>🔍 Run Prediction</h2>
+
+      <label>Simulation mode</label>
+      <select id="mode">
+        <option value="random">Random sensor data</option>
+        <option value="normal">Simulate NORMAL condition</option>
+        <option value="fault">Simulate FAULT condition</option>
+        <option value="real">Use real test sample</option>
+      </select>
+
+      <label>Number of predictions</label>
+      <input type="number" id="n-preds" value="1" min="1" max="20"/>
+
+      <button class="btn" id="predict-btn" onclick="runPrediction()">
+        ▶ Run Prediction
+      </button>
+
+      <div class="result" id="result-box">
+        <div class="icon" id="result-icon"></div>
+        <div class="status" id="result-status"></div>
+        <div class="conf"  id="result-conf"></div>
+        <div class="prob-bar">
+          <div class="row">
+            <span style="width:52px">Fault</span>
+            <div class="bar-bg"><div class="bar-fill fault" id="bar-fault"></div></div>
+            <span id="pct-fault">0%</span>
+          </div>
+          <div class="row">
+            <span style="width:52px">Normal</span>
+            <div class="bar-bg"><div class="bar-fill normal" id="bar-normal"></div></div>
+            <span id="pct-normal">0%</span>
+          </div>
+        </div>
+        <div class="conf" id="result-latency" style="margin-top:10px"></div>
+      </div>
+    </div>
+
+    <!-- Health panel -->
+    <div class="card">
+      <h2>💚 System Health</h2>
+      <div id="health-rows">
+        <div class="health-row"><span>Loading...</span></div>
+      </div>
+      <div style="margin-top:18px">
+        <h2>📋 Model Info</h2>
+        <div class="health-row">
+          <span>Architecture</span><span style="color:#1abc9c">TFT + PSO</span>
+        </div>
+        <div class="health-row">
+          <span>Hidden size</span><span>96</span>
+        </div>
+        <div class="health-row">
+          <span>Attention heads</span><span>8</span>
+        </div>
+        <div class="health-row">
+          <span>Val accuracy (PSO)</span><span style="color:#1abc9c">99.42%</span>
+        </div>
+        <div class="health-row">
+          <span>Test accuracy</span><span style="color:#1abc9c">96.50%</span>
+        </div>
+        <div class="health-row">
+          <span>AUC-ROC</span><span>0.9635</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- History -->
+    <div class="card" style="grid-column: span 2">
+      <h2>📜 Prediction History</h2>
+      <div class="history" id="history-list">
+        <div style="color:#475569;font-size:0.85rem">No predictions yet.</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+const API = "http://localhost:8000";
+let history = [];
+
+// ── Health polling ─────────────────────────────────────────
+async function pollHealth() {
+  try {
+    const r = await fetch(`${API}/health`);
+    const d = await r.json();
+    document.getElementById("api-status").textContent =
+      d.status === "healthy" ? "● Online" : "● Degraded";
+    document.getElementById("api-status").style.color =
+      d.status === "healthy" ? "#1abc9c" : "#e74c3c";
+    document.getElementById("health-rows").innerHTML = `
+      <div class="health-row">
+        <span><span class="dot ${d.model_loaded ? 'green':'red'}"></span>Model</span>
+        <span>${d.model_loaded ? 'Loaded' : 'Not loaded'}</span>
+      </div>
+      <div class="health-row"><span>Device</span><span>${d.device}</span></div>
+      <div class="health-row"><span>Uptime</span><span>${Math.floor(d.uptime_sec)}s</span></div>
+      <div class="health-row"><span>Requests served</span><span>${d.requests_served}</span></div>
+    `;
+  } catch {
+    document.getElementById("api-status").textContent = "● Offline";
+    document.getElementById("api-status").style.color = "#e74c3c";
+  }
+}
+
+// ── Stats polling ─────────────────────────────────────────
+async function pollStats() {
+  try {
+    const r = await fetch(`${API}/stats`);
+    const d = await r.json();
+    document.getElementById("stat-requests").textContent = d.total_requests;
+    document.getElementById("stat-faults").textContent   = d.fault_count;
+    document.getElementById("stat-conf").textContent =
+      d.avg_confidence ? (d.avg_confidence * 100).toFixed(1) + "%" : "—";
+    document.getElementById("stat-lat").textContent =
+      d.avg_latency_ms || "—";
+  } catch {}
+}
+
+// ── Generate sensor window ────────────────────────────────
+function makeWindow(mode) {
+  const w = [];
+  for (let t = 0; t < 60; t++) {
+    const row = [];
+    for (let f = 0; f < 68; f++) {
+      if (mode === "fault")       row.push((Math.random() - 0.5) * 6);
+      else if (mode === "normal") row.push((Math.random() - 0.5) * 0.8);
+      else                        row.push((Math.random() - 0.5) * 3);
+    }
+    w.push(row);
+  }
+  return w;
+}
+
+// ── Run prediction ────────────────────────────────────────
+async function runPrediction() {
+  const btn  = document.getElementById("predict-btn");
+  const mode = document.getElementById("mode").value;
+  const n    = parseInt(document.getElementById("n-preds").value) || 1;
+
+  btn.disabled = true;
+  btn.textContent = "⏳ Running...";
+
+  try {
+    let lastResult = null;
+    for (let i = 0; i < n; i++) {
+      const window = makeWindow(mode);
+      const resp = await fetch(`${API}/predict`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ window })
+      });
+      if (!resp.ok) throw new Error(await resp.text());
+      lastResult = await resp.json();
+      addHistory(lastResult);
+    }
+    showResult(lastResult);
+    pollStats();
+  } catch (e) {
+    alert("API error: " + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "▶ Run Prediction";
+  }
+}
+
+// ── Show result ───────────────────────────────────────────
+function showResult(d) {
+  const box    = document.getElementById("result-box");
+  const isFault = d.prediction === 0;
+
+  box.className = "result " + (isFault ? "fault" : "normal");
+  box.style.display = "block";
+
+  document.getElementById("result-icon").textContent   = isFault ? "🔴" : "🟢";
+  document.getElementById("result-status").textContent = d.label;
+  document.getElementById("result-conf").textContent   =
+    `Confidence: ${(d.confidence * 100).toFixed(1)}%`;
+  document.getElementById("result-latency").textContent =
+    `Inference latency: ${d.latency_ms} ms`;
+
+  const fp = (d.fault_prob  * 100).toFixed(1);
+  const np = (d.normal_prob * 100).toFixed(1);
+  document.getElementById("bar-fault").style.width  = fp + "%";
+  document.getElementById("bar-normal").style.width = np + "%";
+  document.getElementById("pct-fault").textContent  = fp + "%";
+  document.getElementById("pct-normal").textContent = np + "%";
+}
+
+// ── History ───────────────────────────────────────────────
+function addHistory(d) {
+  history.unshift(d);
+  if (history.length > 50) history.pop();
+  const list = document.getElementById("history-list");
+  list.innerHTML = history.map((h, i) => `
+    <div class="history-item">
+      <span>#${history.length - i}</span>
+      <span class="pill ${h.prediction === 0 ? 'fault':'normal'}">${h.label}</span>
+      <span>Conf: ${(h.confidence*100).toFixed(1)}%</span>
+      <span>Fault: ${(h.fault_prob*100).toFixed(1)}% · Normal: ${(h.normal_prob*100).toFixed(1)}%</span>
+      <span>${h.latency_ms}ms</span>
+      <span class="ts">${new Date(h.timestamp).toLocaleTimeString()}</span>
+    </div>
+  `).join("");
+}
+
+// ── Boot ──────────────────────────────────────────────────
+pollHealth();
+pollStats();
+setInterval(pollHealth, 5000);
+setInterval(pollStats,  10000);
+</script>
+</body>
+</html>
