@@ -14,7 +14,7 @@ model:
 
 pso:
   n_particles: 10
-  iterations: 30
+  iterations: 20
   options:
     c1: 1.5
     c2: 1.5
