@@ -21,11 +21,25 @@ sys.path.append(os.path.dirname(__file__))
 from model.tft import TemporalFusionTransformer
 from mlops.drift import cusum_detect
 
+from evaluation.explain import extract_sensor_importance
+
+from prometheus_fastapi_instrumentator import Instrumentator
+from prometheus_client import Counter, Histogram, Gauge, REGISTRY, generate_latest, CONTENT_TYPE_LATEST
+from fastapi.responses import Response
+
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app):
+    load_model()
+    yield
+
 # ── App setup ────────────────────────────────────────────────
 app = FastAPI(
     title="Predictive Maintenance API",
     description="Real-time fault prediction for hydraulic systems using TFT + PSO",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan       
 )
 
 app.add_middleware(
@@ -33,6 +47,50 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+# ── Prometheus metrics ────────────────────────────────────────
+Instrumentator().instrument(app).expose(app, endpoint="/metrics")
+
+def _get_or_create_metric(metric_class, name, description, **kwargs):
+    """Get existing metric or create new one — avoids duplicate registration error"""
+    try:
+        return metric_class(name, description, **kwargs)
+    except ValueError:
+        # Already registered — retrieve it from the registry
+        return REGISTRY._names_to_collectors.get(name) or \
+               REGISTRY._names_to_collectors.get(name + "_total")
+
+FAULT_COUNTER = _get_or_create_metric(
+    Counter,
+    "predictive_maintenance_faults",
+    "Total number of FAULT predictions"
+)
+NORMAL_COUNTER = _get_or_create_metric(
+    Counter,
+    "predictive_maintenance_normal",
+    "Total number of NORMAL predictions"
+)
+PREDICTION_LATENCY = _get_or_create_metric(
+    Histogram,
+    "predictive_maintenance_latency_ms",
+    "Prediction latency in milliseconds",
+    buckets=[50, 100, 200, 300, 500, 1000, 2000]
+)
+CUSUM_DRIFT_SCORE = _get_or_create_metric(
+    Gauge,
+    "predictive_maintenance_cusum_drift_score",
+    "Current CUSUM drift score"
+)
+CONFIDENCE_GAUGE = _get_or_create_metric(
+    Gauge,
+    "predictive_maintenance_avg_confidence",
+    "Rolling average prediction confidence"
+)
+REQUEST_THROUGHPUT = _get_or_create_metric(
+    Counter,
+    "predictive_maintenance_requests",
+    "Total prediction requests served"
 )
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -53,16 +111,13 @@ def load_model():
     if not os.path.exists(checkpoint):
         raise RuntimeError(f"No model checkpoint at {checkpoint}. Run main.py first.")
     MODEL = TemporalFusionTransformer(
-        input_dim=68, hidden_dim=96,
+        input_dim=68, hidden_dim=128,
         num_heads=8, dropout=0.068, num_classes=2
     ).to(DEVICE)
     MODEL.load_state_dict(torch.load(checkpoint, map_location=DEVICE))
     MODEL.eval()
     print(f"✅ Model loaded on {DEVICE}")
 
-@app.on_event("startup")
-def startup_event():
-    load_model()
 
 # ── Schemas ───────────────────────────────────────────────────
 class SensorWindow(BaseModel):
@@ -73,7 +128,7 @@ class SensorWindow(BaseModel):
     window: List[List[float]] = Field(
         ...,
         description="60 timesteps x 68 features",
-        example=[[0.1] * 68] * 60
+        json_schema_extra={"example": [[0.1] * 68] * 60}
     )
 
 class PredictionResponse(BaseModel):
@@ -84,6 +139,7 @@ class PredictionResponse(BaseModel):
     normal_prob:   float     # probability of normal (class 1)
     latency_ms:    float
     timestamp:     str
+    explanation:   dict
 
 class BatchRequest(BaseModel):
     windows: List[List[List[float]]] = Field(
@@ -125,6 +181,17 @@ def health():
         device=str(DEVICE)
     )
 
+class PredictionResponse(BaseModel):
+    prediction:    int
+    label:         str
+    confidence:    float
+    fault_prob:    float
+    normal_prob:   float
+    latency_ms:    float
+    timestamp:     str
+    explanation:   dict   # ← NEW
+
+# Replace the predict function
 @app.post("/predict", response_model=PredictionResponse, tags=["Inference"])
 def predict(data: SensorWindow):
     global REQUEST_COUNT, PREDICTION_LOG
@@ -139,20 +206,44 @@ def predict(data: SensorWindow):
         )
 
     t0 = time.time()
+    x  = torch.tensor(window).unsqueeze(0).to(DEVICE)
+
     with torch.no_grad():
-        x      = torch.tensor(window).unsqueeze(0).to(DEVICE)  # (1, 60, 68)
-        logits = MODEL(x)
-        probs  = torch.softmax(logits, dim=1)[0].cpu().numpy()
+        logits, _ = MODEL(x, return_attention=True)
+        probs     = torch.softmax(logits, dim=1)[0].cpu().numpy()
 
     latency_ms = round((time.time() - t0) * 1000, 2)
     pred       = int(np.argmax(probs))
     label      = "NORMAL" if pred == 1 else "FAULT"
     confidence = round(float(probs[pred]), 4)
 
+    # ── Explainability ────────────────────────────────────────────
+    sensor_scores, _, top3 = extract_sensor_importance(MODEL, x)
+    explanation = {
+        "top_sensors": [
+            {"rank": i+1, "sensor": s, "importance": round(score, 4)}
+            for i, (s, score) in enumerate(top3)
+        ],
+        "all_sensor_scores": {k: round(v, 4) for k, v in sensor_scores.items()}
+    }
+
     REQUEST_COUNT += 1
     PREDICTION_LOG.append({
         "pred": pred, "confidence": confidence, "latency_ms": latency_ms
     })
+
+    # ── Track Prometheus metrics ──────────────────────────────
+    REQUEST_THROUGHPUT.inc()
+    PREDICTION_LATENCY.observe(latency_ms)
+    if pred == 0:
+        FAULT_COUNTER.inc()
+    else:
+        NORMAL_COUNTER.inc()
+
+    # Update rolling confidence gauge
+    if PREDICTION_LOG:
+        avg_conf = np.mean([p["confidence"] for p in PREDICTION_LOG[-50:]])
+        CONFIDENCE_GAUGE.set(avg_conf)
 
     return PredictionResponse(
         prediction=pred,
@@ -161,7 +252,8 @@ def predict(data: SensorWindow):
         fault_prob=round(float(probs[0]), 4),
         normal_prob=round(float(probs[1]), 4),
         latency_ms=latency_ms,
-        timestamp=datetime.utcnow().isoformat()
+        timestamp=datetime.utcnow().isoformat(),
+        explanation=explanation
     )
 
 @app.post("/predict/batch", tags=["Inference"])
@@ -201,6 +293,24 @@ def predict_batch(data: BatchRequest):
         "results":     results
     }
 
+@app.get("/metrics/custom", tags=["Monitoring"])
+def custom_metrics():
+    """Expose all custom Prometheus metrics"""
+    if PREDICTION_LOG:
+        # Compute live CUSUM score from recent predictions
+        recent = PREDICTION_LOG[-100:]
+        preds  = [p["pred"] for p in recent]
+        confs  = [p["confidence"] for p in recent]
+        S      = 0.0
+        for pred_val, conf in zip(preds, confs):
+            S = max(0, S + (pred_val - conf) - 0.5)
+        CUSUM_DRIFT_SCORE.set(S)
+
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST
+    )
+
 @app.get("/stats", response_model=StatsResponse, tags=["Monitoring"])
 def stats():
     if not PREDICTION_LOG:
@@ -230,7 +340,10 @@ def reload_model():
 
 @app.get("/ui", tags=["UI"])
 def ui(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html"
+    )
 
 if __name__ == "__main__":
     import uvicorn
