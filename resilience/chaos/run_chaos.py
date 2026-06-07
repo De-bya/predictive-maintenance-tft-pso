@@ -15,7 +15,7 @@ from model.tft                 import TemporalFusionTransformer
 
 def load_model():
     model = TemporalFusionTransformer(
-        input_dim=68, hidden_dim=96,
+        input_dim=68, hidden_dim=128,
         num_heads=8, dropout=0.1, num_classes=2
     )
     model.load_state_dict(

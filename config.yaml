@@ -31,6 +31,7 @@ pso:
 drift:
   delta: 0.5
   threshold: 5.0
+  auto_retrain: true
 
 resilience:
   initial_delay: 1.0

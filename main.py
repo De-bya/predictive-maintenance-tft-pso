@@ -63,6 +63,15 @@ def main(skip_pso=False):
         print(f"   Recall:    {metrics['Recall (%)']:.2f}%")
         print(f"   F1-Score:  {metrics['F1-Score (%)']:.2f}%")
 
+        # ── Auto-export to ONNX after training ─────────────────
+        print("\n📦 Exporting model to ONNX...")
+        try:
+            from model.export_onnx import export_to_onnx, benchmark_pytorch_vs_onnx
+            export_to_onnx()
+            benchmark_pytorch_vs_onnx(n_runs=30)
+        except Exception as e:
+            print(f"⚠️  ONNX export failed (non-critical): {e}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

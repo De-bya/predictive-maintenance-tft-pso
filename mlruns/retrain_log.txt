@@ -1,0 +1,3 @@
+2026-06-07T14:38:23.368084 | trigger=cusum | drift=6.5000 | prev_acc=95.10% | new_acc=83.45% | status=REJECTED
+2026-06-07T15:51:24.478380 | trigger=cusum | drift=0.0000 | prev_acc=83.45% | new_acc=84.85% | status=PROMOTED
+2026-06-07T15:52:25.038349 | trigger=cusum | drift=6.5000 | prev_acc=90.91% | new_acc=84.85% | status=REJECTED

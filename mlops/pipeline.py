@@ -131,7 +131,7 @@ def train_model(model, X_train, y_train, config, best_params=None):
     print(f"✅ Training complete — Best loss: {best_loss:.4f}")
     return model
 
-def evaluate_model(model, X_test, y_test):
+def evaluate_model(model, X_test, y_test, auto_retrain=False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.eval()
     X_t = torch.tensor(X_test, dtype=torch.float32).to(device)
@@ -143,9 +143,22 @@ def evaluate_model(model, X_test, y_test):
 
     metrics = compute_all_metrics(y_test, preds, y_prob=probs)
 
-    drift_pts = cusum_detect(y_test.astype(float), probs)
+    # CUSUM now returns (drift_points, drift_score)
+    drift_pts, drift_score = cusum_detect(y_test.astype(float), probs)
     metrics['drift_points']     = len(drift_pts)
+    metrics['drift_score']      = drift_score
     metrics['needs_retraining'] = needs_retraining(drift_pts)
+
+    # ── Auto-retrain if drift detected ────────────────────────
+    if auto_retrain and metrics['needs_retraining']:
+        print(f"\n🚨 Drift threshold exceeded — triggering automated retraining")
+        from mlops.retrain import run_automated_retraining
+        retrain_result = run_automated_retraining(
+            drift_score=drift_score,
+            drift_points=drift_pts,
+            trigger_source="cusum_auto"
+        )
+        metrics['retrain_result'] = retrain_result
 
     return metrics, preds, probs
 
@@ -176,7 +189,11 @@ def run_pipeline(best_params=None):
             return train_model(model, X_train, y_train, config, params)
 
         trained_model = with_exponential_backoff(train_fn)
-        metrics, preds, probs = evaluate_model(trained_model, X_test, y_test)
+        # metrics, preds, probs = evaluate_model(trained_model, X_test, y_test)
+        auto_retrain = config.get('drift', {}).get('auto_retrain', False)
+        metrics, preds, probs = evaluate_model(
+            trained_model, X_test, y_test, auto_retrain=auto_retrain
+        )
 
         mlflow.log_metrics({
             'accuracy':  metrics['Accuracy (%)'],

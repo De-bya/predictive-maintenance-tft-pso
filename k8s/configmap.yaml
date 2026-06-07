@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: predictive-maintenance-config
+  namespace: predictive-maintenance
+data:
+  config.yaml: |
+    data:
+      raw_dir: "data/raw"
+      processed_dir: "data/processed"
+      window_size: 60
+      test_split: 0.2
+    model:
+      hidden_size: 128
+      attention_heads: 4
+      dropout: 0.1
+      max_epochs: 50
+      batch_size: 32
+      learning_rate: 0.0005
+      multi_label: false
+      use_weighted_loss: true
+    drift:
+      delta: 0.5
+      threshold: 5.0
+      auto_retrain: true
+    resilience:
+      initial_delay: 1.0
+      max_retries: 5
+    mlflow:
+      experiment_name: "predictive_maintenance_tft_pso"
+      tracking_uri: "mlruns"

@@ -27,11 +27,14 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from prometheus_client import Counter, Histogram, Gauge, REGISTRY, generate_latest, CONTENT_TYPE_LATEST
 from fastapi.responses import Response
 
+import onnxruntime as ort
+
 from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app):
     load_model()
+    load_onnx_session()
     yield
 
 # ── App setup ────────────────────────────────────────────────
@@ -100,10 +103,29 @@ templates = Jinja2Templates(directory="templates")
 
 # ── Global model state ────────────────────────────────────────
 MODEL = None
+ONNX_SESSION = None
+ONNX_PATH    = "data/processed/tft_model.onnx"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 START_TIME = time.time()
 REQUEST_COUNT = 0
 PREDICTION_LOG = []
+
+def load_onnx_session():
+    global ONNX_SESSION
+    if os.path.exists(ONNX_PATH):
+        opts = ort.SessionOptions()
+        opts.graph_optimization_level = (
+            ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        )
+        ONNX_SESSION = ort.InferenceSession(
+            ONNX_PATH,
+            sess_options=opts,
+            providers=["CPUExecutionProvider"]
+        )
+        print(f"✅ ONNX session loaded from {ONNX_PATH}")
+    else:
+        print(f"⚠️  No ONNX model at {ONNX_PATH} — run model/export_onnx.py first")
+
 
 def load_model():
     global MODEL
@@ -328,6 +350,148 @@ def stats():
         avg_confidence=avg_conf,
         avg_latency_ms=avg_lat
     )
+
+@app.post("/retrain", tags=["Admin"])
+def trigger_retraining(force: bool = False):
+    """
+    Manually trigger model retraining.
+    If force=True, retrain even without drift.
+    Otherwise only retrain if CUSUM score exceeds threshold.
+    """
+    from mlops.retrain import run_automated_retraining
+
+    # Compute current CUSUM score from recent predictions
+    if not PREDICTION_LOG:
+        if not force:
+            raise HTTPException(
+                status_code=400,
+                detail="No predictions made yet. Use force=true to retrain anyway."
+            )
+        drift_score, drift_pts = 0.0, []
+    else:
+        recent_preds = [p["pred"]       for p in PREDICTION_LOG[-100:]]
+        recent_confs = [p["confidence"] for p in PREDICTION_LOG[-100:]]
+        S, drift_pts = 0.0, []
+        scores = []
+        for t, (pred_val, conf) in enumerate(zip(recent_preds, recent_confs)):
+            S = max(0, S + (pred_val - conf) - 0.5)
+            scores.append(S)
+            if S > 5.0:
+                drift_pts.append(t)
+                S = 0.0
+        drift_score = float(np.mean(scores)) if scores else 0.0
+
+    if not force and drift_score < 5.0:
+        return {
+            "status":      "skipped",
+            "reason":      "CUSUM drift score below threshold",
+            "drift_score": drift_score,
+            "threshold":   5.0,
+            "tip":         "Use ?force=true to retrain regardless"
+        }
+
+    import threading
+    result_holder = {}
+
+    def retrain_bg():
+        result_holder["result"] = run_automated_retraining(
+            drift_score=drift_score,
+            drift_points=drift_pts,
+            trigger_source="api_manual" if force else "api_drift"
+        )
+
+    thread = threading.Thread(target=retrain_bg, daemon=True)
+    thread.start()
+    thread.join(timeout=0)   # fire and forget
+
+    return {
+        "status":      "retraining_started",
+        "drift_score": drift_score,
+        "drift_points": len(drift_pts),
+        "force":        force,
+        "timestamp":    datetime.utcnow().isoformat(),
+        "note":         "Retraining running in background. Check /health or MLflow for status."
+    }
+
+@app.post("/predict/onnx", tags=["Inference"])
+def predict_onnx(data: SensorWindow):
+    """
+    Run inference using ONNX Runtime instead of PyTorch.
+    Typically 2-5x faster on CPU.
+    """
+    if ONNX_SESSION is None:
+        raise HTTPException(
+            status_code=503,
+            detail="ONNX model not loaded. Run: python model/export_onnx.py"
+        )
+
+    window = np.array(data.window, dtype=np.float32)
+    if window.shape != (60, 68):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Expected shape (60, 68), got {window.shape}"
+        )
+
+    t0 = time.time()
+
+    # ONNX Runtime inference
+    onnx_input  = window[np.newaxis, ...]          # (1, 60, 68)
+    logits      = ONNX_SESSION.run(
+        None, {"sensor_window": onnx_input}
+    )[0][0]                                         # (2,)
+
+    probs      = np.exp(logits) / np.exp(logits).sum()  # softmax
+    pred       = int(np.argmax(probs))
+    label      = "NORMAL" if pred == 1 else "FAULT"
+    confidence = round(float(probs[pred]), 4)
+    latency_ms = round((time.time() - t0) * 1000, 2)
+
+    # Explainability
+    x_tensor = torch.tensor(window).unsqueeze(0)
+    sensor_scores, _, top3 = extract_sensor_importance(MODEL, x_tensor)
+    explanation = {
+        "top_sensors": [
+            {"rank": i+1, "sensor": s, "importance": round(score, 4)}
+            for i, (s, score) in enumerate(top3)
+        ]
+    }
+
+    # Track metrics
+    REQUEST_THROUGHPUT.inc()
+    PREDICTION_LATENCY.observe(latency_ms)
+    if pred == 0:
+        FAULT_COUNTER.inc()
+    else:
+        NORMAL_COUNTER.inc()
+
+    return PredictionResponse(
+        prediction=pred,
+        label=label,
+        confidence=confidence,
+        fault_prob=round(float(probs[0]), 4),
+        normal_prob=round(float(probs[1]), 4),
+        latency_ms=latency_ms,
+        timestamp=datetime.utcnow().isoformat(),
+        explanation=explanation
+    )
+
+@app.post("/export/onnx", tags=["Admin"])
+def export_onnx():
+    """Export current PyTorch model to ONNX and reload the session"""
+    try:
+        from model.export_onnx import export_to_onnx, benchmark_pytorch_vs_onnx
+        export_to_onnx()
+        load_onnx_session()
+        benchmark = benchmark_pytorch_vs_onnx(n_runs=20)
+        return {
+            "status":   "exported",
+            "path":     ONNX_PATH,
+            "speedup":  round(benchmark["speedup"], 2),
+            "pytorch_mean_ms": round(benchmark["pytorch"]["mean"], 2),
+            "onnx_mean_ms":    round(benchmark["onnx"]["mean"], 2),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/reload", tags=["Admin"])
 def reload_model():

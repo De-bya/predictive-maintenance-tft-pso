@@ -368,7 +368,7 @@ The attention mechanism captures long-range dependencies across all 60 timesteps
 ```
 Attention Output = Softmax(QKᵀ / √d_k) × V
 ```
-Where Q, K, V are query/key/value projections of the LSTM output. With `attention_heads=8` and `hidden_dim=96`, each head attends to 12-dimensional subspaces.
+Where Q, K, V are query/key/value projections of the LSTM output. With `attention_heads=8` and `hidden_dim=128`, each head attends to 12-dimensional subspaces.
 
 #### Final classifier
 ```

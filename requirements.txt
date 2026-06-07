@@ -17,3 +17,5 @@ uvicorn>=0.29.0
 python-multipart>=0.0.9
 prometheus-fastapi-instrumentator>=6.1.0
 prometheus-client>=0.20.0
+onnx>=1.16.0
+onnxruntime>=1.18.0

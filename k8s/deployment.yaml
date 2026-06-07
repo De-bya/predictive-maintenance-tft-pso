@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: predictive-maintenance-api
+  namespace: predictive-maintenance
+  labels:
+    app: predictive-maintenance-api
+    version: "1.0.0"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: predictive-maintenance-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0      # zero-downtime deployment
+  template:
+    metadata:
+      labels:
+        app: predictive-maintenance-api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port:   "8000"
+        prometheus.io/path:   "/metrics"
+    spec:
+      containers:
+        - name: api
+          image: predictive-maintenance:latest
+          imagePullPolicy: IfNotPresent   # use local image with minikube
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu:    "250m"
+            limits:
+              memory: "2Gi"
+              cpu:    "1000m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            failureThreshold: 3
+          volumeMounts:
+            - name: model-data
+              mountPath: /app/data/processed
+            - name: config
+              mountPath: /app/config_k8s.yaml
+              subPath: config.yaml
+      volumes:
+        - name: model-data
+          emptyDir: {}           # replace with PersistentVolumeClaim in production
+        - name: config
+          configMap:
+            name: predictive-maintenance-config
