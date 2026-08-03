@@ -98,15 +98,13 @@ jobs:
       steps:
         - uses: actions/checkout@v4
 
-        - name: Install kubectl
+        - name: Install kubeconform
           run: |
-            curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-            chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+            curl -sL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz -o kubeconform.tar.gz
+            tar xzf kubeconform.tar.gz
+            sudo mv kubeconform /usr/local/bin/
 
         - name: Validate k8s manifests
           run: |
-            kubectl apply --dry-run=client --validate=false -f k8s/namespace.yaml
-            kubectl apply --dry-run=client --validate=false -f k8s/configmap.yaml
-            kubectl apply --dry-run=client --validate=false -f k8s/deployment.yaml
-            kubectl apply --dry-run=client --validate=false -f k8s/service.yaml
+            kubeconform -summary -strict k8s/namespace.yaml k8s/configmap.yaml k8s/deployment.yaml k8s/service.yaml
             echo "✅ All k8s manifests valid"
