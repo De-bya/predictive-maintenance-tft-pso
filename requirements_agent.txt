@@ -1,0 +1,13 @@
+# Additional dependencies for the knowledge graph + RAG + chatbot layer.
+# Install alongside the existing requirements.txt:
+#   pip install -r requirements.txt -r requirements_agent.txt
+
+neo4j>=5.20.0                  # Neo4j Python driver (graph_writer.py)
+langchain>=0.2.0               # agent framework
+langchain-core>=0.2.0
+langchain-community>=0.2.0     # FAISS + HuggingFaceEmbeddings integrations
+langchain-openai>=0.1.0        # only needed if using ChatOpenAI; swap for
+                                # langchain-community's ChatOllama to run fully
+                                # local/free with no API key
+sentence-transformers>=2.7.0   # local embedding model for RAG
+faiss-cpu>=1.8.0                # local vector store, no external service needed

@@ -30,11 +30,16 @@ from fastapi.responses import Response
 import onnxruntime as ort
 
 from contextlib import asynccontextmanager
+from agent.chatbot import build_agent, ask as agent_ask
+
+_AGENT = None
 
 @asynccontextmanager
 async def lifespan(app):
+    global _AGENT
     load_model()
     load_onnx_session()
+    _AGENT = build_agent()
     yield
 
 # ── App setup ────────────────────────────────────────────────
@@ -350,6 +355,19 @@ def stats():
         avg_confidence=avg_conf,
         avg_latency_ms=avg_lat
     )
+
+class ChatRequest(BaseModel):
+    message: str
+
+class ChatResponse(BaseModel):
+    reply: str
+
+@app.post("/chat", response_model=ChatResponse, tags=["Chatbot"])
+def chat(data: ChatRequest):
+    """Operator-facing chatbot: prediction + knowledge graph + RAG,
+    synthesized by an LLM via LangChain (v1.0+ create_agent API)."""
+    reply = agent_ask(_AGENT, data.message)
+    return ChatResponse(reply=reply)
 
 @app.post("/retrain", tags=["Admin"])
 def trigger_retraining(force: bool = False):

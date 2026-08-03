@@ -219,3 +219,5 @@ __marimo__/
 
 
 data/
+knowledge/faiss_index/
+__pycache__/
