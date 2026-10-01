@@ -4,22 +4,18 @@ data:
   window_size: 60
   test_split: 0.2
 
+# Used when PSO is skipped (python main.py --skip-pso).
+# heads / layers / learning_rate = best values found by the last PSO run.
 model:
   hidden_size: 128
-  attention_heads: 4
+  attention_heads: 8
+  num_layers: 2
   dropout: 0.1
   max_epochs: 50
   batch_size: 64
-  learning_rate: 0.001
-  multi_label: false   
-  use_weighted_loss: true         
-  output_targets:            
-    - cooler
-    - valve
-    - pump
-    - accumulator
-    - stable_flag
+  learning_rate: 0.00234
 
+# Paper Eq. 4 — tunes learning rate, number of layers, attention heads
 pso:
   n_particles: 10
   iterations: 20
@@ -28,15 +24,16 @@ pso:
     c2: 1.5
     w: 0.7
 
+# Paper Eq. 6 — CUSUM drift detection
 drift:
   delta: 0.5
   threshold: 5.0
   auto_retrain: true
 
+# Paper Eq. 7 — exponential backoff
 resilience:
   initial_delay: 1.0
   max_retries: 5
 
 mlflow:
   experiment_name: "predictive_maintenance_tft_pso"
-  tracking_uri: "mlruns"

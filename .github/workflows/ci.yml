@@ -2,7 +2,7 @@ name: CI — Test & Validate Pipeline
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, paper-implementation]
   pull_request:
     branches: [main]
 
@@ -22,61 +22,69 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run preprocessing tests
+      - name: Preprocessing tests (Eq. 1-2)
         run: |
           python -c "
-          import numpy as np
+          import numpy as np, pandas as pd
           from preprocessing.preprocess import interpolate_missing, zscore_normalize
-          import pandas as pd
           df = pd.DataFrame(np.random.randn(100, 68))
+          df.iloc[5, 3] = np.nan
           df = interpolate_missing(df)
           df, scaler = zscore_normalize(df)
-          assert df.shape == (100, 68), 'Preprocessing shape mismatch'
+          assert df.shape == (100, 68) and not df.isnull().any().any()
           print('✅ Preprocessing tests passed')
           "
 
-      - name: Run model architecture tests
+      - name: TFT model tests (Eq. 3, 5)
         run: |
           python -c "
           import torch
           from model.tft import TemporalFusionTransformer
-          model = TemporalFusionTransformer(
-              input_dim=68, hidden_dim=128,
-              num_heads=8, dropout=0.1, num_classes=2
-          )
-          x = torch.randn(4, 60, 68)
-          out = model(x)
+          model = TemporalFusionTransformer(input_dim=68, hidden_dim=128,
+                                            num_heads=4, num_layers=2)
+          out = model(torch.randn(4, 60, 68))
           assert out.shape == (4, 2), f'Expected (4,2) got {out.shape}'
           print('✅ TFT model tests passed')
           "
 
-      - name: Run drift detection tests
+      - name: PSO particle decoding test (Eq. 4)
         run: |
           python -c "
-          from mlops.drift import cusum_detect, needs_retraining
-          import numpy as np
-          y_actual = np.random.rand(100)
-          y_pred   = np.random.rand(100)
-          pts = cusum_detect(y_actual, y_pred)
-          print(f'✅ CUSUM drift test passed — {len(pts)} drift points')
+          from model.pso import PSO, decode_particle
+          pso = PSO()
+          lr, layers, heads = decode_particle(pso.bounds['high'])
+          assert layers == 3 and heads == 8 and 128 % heads == 0
+          print('✅ PSO tests passed')
           "
 
-      - name: Run resilience tests
+      - name: CUSUM drift detection tests (Eq. 6)
+        run: |
+          python -c "
+          import numpy as np
+          from mlops.drift import cusum_detect
+          pts, _ = cusum_detect(np.ones(50), np.zeros(50))
+          assert len(pts) > 0, 'CUSUM should flag a constant shift'
+          pts, _ = cusum_detect(np.ones(50), np.ones(50))
+          assert len(pts) == 0, 'CUSUM should not flag perfect predictions'
+          print('✅ CUSUM tests passed')
+          "
+
+      - name: Exponential backoff tests (Eq. 7)
         run: |
           python -c "
           from resilience.backoff import with_exponential_backoff
-          result = with_exponential_backoff(lambda: 42, initial_delay=0.01)
-          assert result == 42
-          print('✅ Backoff test passed')
+          calls = []
+          def flaky():
+              calls.append(1)
+              if len(calls) < 3: raise IOError('transient')
+              return 42
+          assert with_exponential_backoff(flaky, initial_delay=0.01) == 42
+          assert len(calls) == 3
+          print('✅ Backoff tests passed')
           "
 
-      - name: Run API import test
-        run: |
-          python -c "
-          import importlib.util, sys
-          spec = importlib.util.spec_from_file_location('api', 'api.py')
-          print('✅ API import test passed')
-          "
+      - name: API import test
+        run: python -c "import api; print('✅ API import test passed')"
 
   docker-build:
     runs-on: ubuntu-latest
@@ -86,25 +94,3 @@ jobs:
 
       - name: Build Docker image
         run: docker build -t predictive-maintenance:latest .
-
-      - name: Verify image builds
-        run: |
-          docker images predictive-maintenance
-          echo "✅ Docker build successful"
-          
-  k8s-validate:
-      runs-on: ubuntu-latest
-      needs: test
-      steps:
-        - uses: actions/checkout@v4
-
-        - name: Install kubeconform
-          run: |
-            curl -sL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz -o kubeconform.tar.gz
-            tar xzf kubeconform.tar.gz
-            sudo mv kubeconform /usr/local/bin/
-
-        - name: Validate k8s manifests
-          run: |
-            kubeconform -summary -strict k8s/namespace.yaml k8s/configmap.yaml k8s/deployment.yaml k8s/service.yaml
-            echo "✅ All k8s manifests valid"

@@ -1,6 +1,0 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: predictive-maintenance
-  labels:
-    app: predictive-maintenance

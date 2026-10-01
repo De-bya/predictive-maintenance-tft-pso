@@ -218,6 +218,8 @@ __marimo__/
 .streamlit/secrets.toml
 
 
-data/
-knowledge/faiss_index/
+data/*
+!data/download_data.py
+mlruns/**/artifacts/data/
+knowledge/
 __pycache__/

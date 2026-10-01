@@ -11,18 +11,7 @@ import time
 from resilience.chaos.probes  import model_checkpoint_exists, model_can_predict
 from resilience.chaos.actions import drop_sensor, inject_noise, simulate_latency, restore_all
 from resilience.sre            import SREMonitor
-from model.tft                 import TemporalFusionTransformer
-
-def load_model():
-    model = TemporalFusionTransformer(
-        input_dim=68, hidden_dim=128,
-        num_heads=8, dropout=0.1, num_classes=2
-    )
-    model.load_state_dict(
-        torch.load("data/processed/best_model.pt", map_location="cpu")
-    )
-    model.eval()
-    return model
+from mlops.registry             import load_trained_model
 
 def predict(model, X):
     with torch.no_grad():
@@ -45,7 +34,7 @@ def run_chaos_suite():
 
     X_test  = np.load("data/processed/X_test.npy")
     y_test  = np.load("data/processed/y_test.npy")
-    model   = load_model()
+    model, _ = load_trained_model()
     results = {}
 
     # ── Baseline accuracy ────────────────────────────────────

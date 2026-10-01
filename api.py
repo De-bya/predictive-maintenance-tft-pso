@@ -1,532 +1,110 @@
 """
-FastAPI inference endpoint for the TFT predictive maintenance model.
-Serves real-time fault predictions from sensor data.
+FastAPI inference service — the deployment target of the MLOps pipeline.
+Serves fault predictions and exposes the paper's operational metrics:
+service availability (Eq. 14), throughput (Eq. 15) and latency (Eq. 16).
 """
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+import time
+from contextlib import asynccontextmanager
+from datetime import datetime
+from typing import List
+
 import numpy as np
 import torch
-import time
-import os
-import sys
-from typing import List
-from datetime import datetime
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
 
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
-from fastapi import Request
+from mlops.registry import load_trained_model, rollback_model
+from resilience.backoff import with_exponential_backoff
 
-sys.path.append(os.path.dirname(__file__))
-from model.tft import TemporalFusionTransformer
-from mlops.drift import cusum_detect
+MODEL = None
+START_TIME = time.time()
+STATS = {"requests": 0, "failed": 0, "faults": 0, "total_latency": 0.0}
 
-from evaluation.explain import extract_sensor_importance
-
-from prometheus_fastapi_instrumentator import Instrumentator
-from prometheus_client import Counter, Histogram, Gauge, REGISTRY, generate_latest, CONTENT_TYPE_LATEST
-from fastapi.responses import Response
-
-import onnxruntime as ort
-
-from contextlib import asynccontextmanager
-from agent.chatbot import build_agent, ask as agent_ask
-
-_AGENT = None
+def load_model():
+    """Load the production model; if it is corrupted, roll back (SRE)"""
+    global MODEL
+    try:
+        MODEL, _ = with_exponential_backoff(load_trained_model,
+                                            initial_delay=0.5, max_retries=3)
+    except RuntimeError:
+        try:
+            MODEL, _ = rollback_model()
+        except FileNotFoundError:
+            print("⚠️  No model available — run main.py first")
+            return
+    print("✅ Model loaded")
 
 @asynccontextmanager
 async def lifespan(app):
-    global _AGENT
     load_model()
-    load_onnx_session()
-    _AGENT = build_agent()
     yield
 
-# ── App setup ────────────────────────────────────────────────
 app = FastAPI(
     title="Predictive Maintenance API",
-    description="Real-time fault prediction for hydraulic systems using TFT + PSO",
-    version="1.0.0",
-    lifespan=lifespan       
+    description="Fault prediction for hydraulic systems using TFT + PSO",
+    lifespan=lifespan
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ── Prometheus metrics ────────────────────────────────────────
-Instrumentator().instrument(app).expose(app, endpoint="/metrics")
-
-def _get_or_create_metric(metric_class, name, description, **kwargs):
-    """Get existing metric or create new one — avoids duplicate registration error"""
-    try:
-        return metric_class(name, description, **kwargs)
-    except ValueError:
-        # Already registered — retrieve it from the registry
-        return REGISTRY._names_to_collectors.get(name) or \
-               REGISTRY._names_to_collectors.get(name + "_total")
-
-FAULT_COUNTER = _get_or_create_metric(
-    Counter,
-    "predictive_maintenance_faults",
-    "Total number of FAULT predictions"
-)
-NORMAL_COUNTER = _get_or_create_metric(
-    Counter,
-    "predictive_maintenance_normal",
-    "Total number of NORMAL predictions"
-)
-PREDICTION_LATENCY = _get_or_create_metric(
-    Histogram,
-    "predictive_maintenance_latency_ms",
-    "Prediction latency in milliseconds",
-    buckets=[50, 100, 200, 300, 500, 1000, 2000]
-)
-CUSUM_DRIFT_SCORE = _get_or_create_metric(
-    Gauge,
-    "predictive_maintenance_cusum_drift_score",
-    "Current CUSUM drift score"
-)
-CONFIDENCE_GAUGE = _get_or_create_metric(
-    Gauge,
-    "predictive_maintenance_avg_confidence",
-    "Rolling average prediction confidence"
-)
-REQUEST_THROUGHPUT = _get_or_create_metric(
-    Counter,
-    "predictive_maintenance_requests",
-    "Total prediction requests served"
-)
-
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
-
-
-
-# ── Global model state ────────────────────────────────────────
-MODEL = None
-ONNX_SESSION = None
-ONNX_PATH    = "data/processed/tft_model.onnx"
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-START_TIME = time.time()
-REQUEST_COUNT = 0
-PREDICTION_LOG = []
-
-def load_onnx_session():
-    global ONNX_SESSION
-    if os.path.exists(ONNX_PATH):
-        opts = ort.SessionOptions()
-        opts.graph_optimization_level = (
-            ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        )
-        ONNX_SESSION = ort.InferenceSession(
-            ONNX_PATH,
-            sess_options=opts,
-            providers=["CPUExecutionProvider"]
-        )
-        print(f"✅ ONNX session loaded from {ONNX_PATH}")
-    else:
-        print(f"⚠️  No ONNX model at {ONNX_PATH} — run model/export_onnx.py first")
-
-
-def load_model():
-    global MODEL
-    checkpoint = "data/processed/best_model.pt"
-    if not os.path.exists(checkpoint):
-        raise RuntimeError(f"No model checkpoint at {checkpoint}. Run main.py first.")
-    MODEL = TemporalFusionTransformer(
-        input_dim=68, hidden_dim=128,
-        num_heads=8, dropout=0.068, num_classes=2
-    ).to(DEVICE)
-    MODEL.load_state_dict(torch.load(checkpoint, map_location=DEVICE))
-    MODEL.eval()
-    print(f"✅ Model loaded on {DEVICE}")
-
-
-# ── Schemas ───────────────────────────────────────────────────
 class SensorWindow(BaseModel):
-    """
-    A 60-step window of 68 sensor features.
-    Shape: [60 timesteps x 68 features] flattened to a list of lists.
-    """
+    """A 60-step window of 68 normalized sensor features."""
     window: List[List[float]] = Field(
         ...,
         description="60 timesteps x 68 features",
         json_schema_extra={"example": [[0.1] * 68] * 60}
     )
 
-class PredictionResponse(BaseModel):
-    prediction:    int       # 0 = fault, 1 = normal
-    label:         str       # "FAULT" or "NORMAL"
-    confidence:    float     # probability of predicted class
-    fault_prob:    float     # probability of fault (class 0)
-    normal_prob:   float     # probability of normal (class 1)
-    latency_ms:    float
-    timestamp:     str
-    explanation:   dict
-
-class BatchRequest(BaseModel):
-    windows: List[List[List[float]]] = Field(
-        ..., description="List of sensor windows, each [60 x 68]"
-    )
-
-class HealthResponse(BaseModel):
-    status:        str
-    model_loaded:  bool
-    uptime_sec:    float
-    requests_served: int
-    device:        str
-
-class StatsResponse(BaseModel):
-    total_requests:   int
-    fault_count:      int
-    normal_count:     int
-    avg_confidence:   float
-    avg_latency_ms:   float
-
-# ── Routes ────────────────────────────────────────────────────
-@app.get("/", tags=["Info"])
-def root():
-    return {
-        "service": "Predictive Maintenance API",
-        "model":   "TFT + PSO",
-        "version": "1.0.0",
-        "docs":    "/docs",
-        "health":  "/health"
-    }
-
-@app.get("/health", response_model=HealthResponse, tags=["Monitoring"])
+@app.get("/health")
 def health():
-    return HealthResponse(
-        status="healthy" if MODEL is not None else "degraded",
-        model_loaded=MODEL is not None,
-        uptime_sec=round(time.time() - START_TIME, 2),
-        requests_served=REQUEST_COUNT,
-        device=str(DEVICE)
-    )
+    return {
+        "status":       "healthy" if MODEL is not None else "down",
+        "model_loaded": MODEL is not None,
+        "uptime_sec":   round(time.time() - START_TIME, 2),
+    }
 
-class PredictionResponse(BaseModel):
-    prediction:    int
-    label:         str
-    confidence:    float
-    fault_prob:    float
-    normal_prob:   float
-    latency_ms:    float
-    timestamp:     str
-    explanation:   dict   # ← NEW
-
-# Replace the predict function
-@app.post("/predict", response_model=PredictionResponse, tags=["Inference"])
+@app.post("/predict")
 def predict(data: SensorWindow):
-    global REQUEST_COUNT, PREDICTION_LOG
     if MODEL is None:
+        STATS["failed"] += 1
         raise HTTPException(status_code=503, detail="Model not loaded")
 
     window = np.array(data.window, dtype=np.float32)
     if window.shape != (60, 68):
-        raise HTTPException(
-            status_code=422,
-            detail=f"Expected shape (60, 68), got {window.shape}"
-        )
+        raise HTTPException(status_code=422,
+                            detail=f"Expected shape (60, 68), got {window.shape}")
 
     t0 = time.time()
-    x  = torch.tensor(window).unsqueeze(0).to(DEVICE)
-
     with torch.no_grad():
-        logits, _ = MODEL(x, return_attention=True)
-        probs     = torch.softmax(logits, dim=1)[0].cpu().numpy()
+        logits = MODEL(torch.tensor(window).unsqueeze(0))
+        probs  = torch.softmax(logits, dim=1)[0].numpy()
+    latency_ms = (time.time() - t0) * 1000
 
-    latency_ms = round((time.time() - t0) * 1000, 2)
-    pred       = int(np.argmax(probs))
-    label      = "NORMAL" if pred == 1 else "FAULT"
-    confidence = round(float(probs[pred]), 4)
+    pred = int(np.argmax(probs))
+    STATS["requests"]      += 1
+    STATS["faults"]        += int(pred == 0)
+    STATS["total_latency"] += latency_ms
 
-    # ── Explainability ────────────────────────────────────────────
-    sensor_scores, _, top3 = extract_sensor_importance(MODEL, x)
-    explanation = {
-        "top_sensors": [
-            {"rank": i+1, "sensor": s, "importance": round(score, 4)}
-            for i, (s, score) in enumerate(top3)
-        ],
-        "all_sensor_scores": {k: round(v, 4) for k, v in sensor_scores.items()}
-    }
-
-    REQUEST_COUNT += 1
-    PREDICTION_LOG.append({
-        "pred": pred, "confidence": confidence, "latency_ms": latency_ms
-    })
-
-    # ── Track Prometheus metrics ──────────────────────────────
-    REQUEST_THROUGHPUT.inc()
-    PREDICTION_LATENCY.observe(latency_ms)
-    if pred == 0:
-        FAULT_COUNTER.inc()
-    else:
-        NORMAL_COUNTER.inc()
-
-    # Update rolling confidence gauge
-    if PREDICTION_LOG:
-        avg_conf = np.mean([p["confidence"] for p in PREDICTION_LOG[-50:]])
-        CONFIDENCE_GAUGE.set(avg_conf)
-
-    return PredictionResponse(
-        prediction=pred,
-        label=label,
-        confidence=confidence,
-        fault_prob=round(float(probs[0]), 4),
-        normal_prob=round(float(probs[1]), 4),
-        latency_ms=latency_ms,
-        timestamp=datetime.utcnow().isoformat(),
-        explanation=explanation
-    )
-
-@app.post("/predict/batch", tags=["Inference"])
-def predict_batch(data: BatchRequest):
-    if MODEL is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
-
-    results = []
-    for i, window in enumerate(data.windows):
-        w = np.array(window, dtype=np.float32)
-        if w.shape != (60, 68):
-            raise HTTPException(
-                status_code=422,
-                detail=f"Window {i} has shape {w.shape}, expected (60, 68)"
-            )
-        t0 = time.time()
-        with torch.no_grad():
-            x      = torch.tensor(w).unsqueeze(0).to(DEVICE)
-            logits = MODEL(x)
-            probs  = torch.softmax(logits, dim=1)[0].cpu().numpy()
-        pred  = int(np.argmax(probs))
-        results.append({
-            "index":       i,
-            "prediction":  pred,
-            "label":       "NORMAL" if pred == 1 else "FAULT",
-            "confidence":  round(float(probs[pred]), 4),
-            "fault_prob":  round(float(probs[0]), 4),
-            "normal_prob": round(float(probs[1]), 4),
-            "latency_ms":  round((time.time() - t0) * 1000, 2),
-        })
-
-    fault_count = sum(1 for r in results if r["prediction"] == 0)
     return {
-        "total":       len(results),
-        "fault_count": fault_count,
-        "normal_count": len(results) - fault_count,
-        "results":     results
+        "prediction": pred,                       # 0 = fault, 1 = normal
+        "label":      "NORMAL" if pred == 1 else "FAULT",
+        "fault_prob": round(float(probs[0]), 4),
+        "latency_ms": round(latency_ms, 2),
+        "timestamp":  datetime.utcnow().isoformat(),
     }
 
-@app.get("/metrics/custom", tags=["Monitoring"])
-def custom_metrics():
-    """Expose all custom Prometheus metrics"""
-    if PREDICTION_LOG:
-        # Compute live CUSUM score from recent predictions
-        recent = PREDICTION_LOG[-100:]
-        preds  = [p["pred"] for p in recent]
-        confs  = [p["confidence"] for p in recent]
-        S      = 0.0
-        for pred_val, conf in zip(preds, confs):
-            S = max(0, S + (pred_val - conf) - 0.5)
-        CUSUM_DRIFT_SCORE.set(S)
-
-    return Response(
-        content=generate_latest(),
-        media_type=CONTENT_TYPE_LATEST
-    )
-
-@app.get("/stats", response_model=StatsResponse, tags=["Monitoring"])
+@app.get("/stats")
 def stats():
-    if not PREDICTION_LOG:
-        return StatsResponse(
-            total_requests=0, fault_count=0,
-            normal_count=0, avg_confidence=0.0, avg_latency_ms=0.0
-        )
-    faults    = sum(1 for p in PREDICTION_LOG if p["pred"] == 0)
-    avg_conf  = round(np.mean([p["confidence"] for p in PREDICTION_LOG]), 4)
-    avg_lat   = round(np.mean([p["latency_ms"]  for p in PREDICTION_LOG]), 2)
-    return StatsResponse(
-        total_requests=len(PREDICTION_LOG),
-        fault_count=faults,
-        normal_count=len(PREDICTION_LOG) - faults,
-        avg_confidence=avg_conf,
-        avg_latency_ms=avg_lat
-    )
-
-class ChatRequest(BaseModel):
-    message: str
-
-class ChatResponse(BaseModel):
-    reply: str
-
-@app.post("/chat", response_model=ChatResponse, tags=["Chatbot"])
-def chat(data: ChatRequest):
-    """Operator-facing chatbot: prediction + knowledge graph + RAG,
-    synthesized by an LLM via LangChain (v1.0+ create_agent API)."""
-    reply = agent_ask(_AGENT, data.message)
-    return ChatResponse(reply=reply)
-
-@app.post("/retrain", tags=["Admin"])
-def trigger_retraining(force: bool = False):
-    """
-    Manually trigger model retraining.
-    If force=True, retrain even without drift.
-    Otherwise only retrain if CUSUM score exceeds threshold.
-    """
-    from mlops.retrain import run_automated_retraining
-
-    # Compute current CUSUM score from recent predictions
-    if not PREDICTION_LOG:
-        if not force:
-            raise HTTPException(
-                status_code=400,
-                detail="No predictions made yet. Use force=true to retrain anyway."
-            )
-        drift_score, drift_pts = 0.0, []
-    else:
-        recent_preds = [p["pred"]       for p in PREDICTION_LOG[-100:]]
-        recent_confs = [p["confidence"] for p in PREDICTION_LOG[-100:]]
-        S, drift_pts = 0.0, []
-        scores = []
-        for t, (pred_val, conf) in enumerate(zip(recent_preds, recent_confs)):
-            S = max(0, S + (pred_val - conf) - 0.5)
-            scores.append(S)
-            if S > 5.0:
-                drift_pts.append(t)
-                S = 0.0
-        drift_score = float(np.mean(scores)) if scores else 0.0
-
-    if not force and drift_score < 5.0:
-        return {
-            "status":      "skipped",
-            "reason":      "CUSUM drift score below threshold",
-            "drift_score": drift_score,
-            "threshold":   5.0,
-            "tip":         "Use ?force=true to retrain regardless"
-        }
-
-    import threading
-    result_holder = {}
-
-    def retrain_bg():
-        result_holder["result"] = run_automated_retraining(
-            drift_score=drift_score,
-            drift_points=drift_pts,
-            trigger_source="api_manual" if force else "api_drift"
-        )
-
-    thread = threading.Thread(target=retrain_bg, daemon=True)
-    thread.start()
-    thread.join(timeout=0)   # fire and forget
-
+    """Operational metrics from the paper (Eq. 14-16)"""
+    served  = STATS["requests"]
+    total   = served + STATS["failed"]
+    elapsed = time.time() - START_TIME
     return {
-        "status":      "retraining_started",
-        "drift_score": drift_score,
-        "drift_points": len(drift_pts),
-        "force":        force,
-        "timestamp":    datetime.utcnow().isoformat(),
-        "note":         "Retraining running in background. Check /health or MLflow for status."
+        "requests_served":      served,
+        "fault_predictions":    STATS["faults"],
+        "availability_pct":     round(100 * served / total, 2) if total else 100.0,
+        "throughput_req_per_s": round(served / elapsed, 4),
+        "avg_latency_ms":       round(STATS["total_latency"] / served, 2) if served else 0.0,
     }
-
-@app.post("/predict/onnx", tags=["Inference"])
-def predict_onnx(data: SensorWindow):
-    """
-    Run inference using ONNX Runtime instead of PyTorch.
-    Typically 2-5x faster on CPU.
-    """
-    if ONNX_SESSION is None:
-        raise HTTPException(
-            status_code=503,
-            detail="ONNX model not loaded. Run: python model/export_onnx.py"
-        )
-
-    window = np.array(data.window, dtype=np.float32)
-    if window.shape != (60, 68):
-        raise HTTPException(
-            status_code=422,
-            detail=f"Expected shape (60, 68), got {window.shape}"
-        )
-
-    t0 = time.time()
-
-    # ONNX Runtime inference
-    onnx_input  = window[np.newaxis, ...]          # (1, 60, 68)
-    logits      = ONNX_SESSION.run(
-        None, {"sensor_window": onnx_input}
-    )[0][0]                                         # (2,)
-
-    probs      = np.exp(logits) / np.exp(logits).sum()  # softmax
-    pred       = int(np.argmax(probs))
-    label      = "NORMAL" if pred == 1 else "FAULT"
-    confidence = round(float(probs[pred]), 4)
-    latency_ms = round((time.time() - t0) * 1000, 2)
-
-    # Explainability
-    x_tensor = torch.tensor(window).unsqueeze(0)
-    sensor_scores, _, top3 = extract_sensor_importance(MODEL, x_tensor)
-    explanation = {
-        "top_sensors": [
-            {"rank": i+1, "sensor": s, "importance": round(score, 4)}
-            for i, (s, score) in enumerate(top3)
-        ]
-    }
-
-    # Track metrics
-    REQUEST_THROUGHPUT.inc()
-    PREDICTION_LATENCY.observe(latency_ms)
-    if pred == 0:
-        FAULT_COUNTER.inc()
-    else:
-        NORMAL_COUNTER.inc()
-
-    return PredictionResponse(
-        prediction=pred,
-        label=label,
-        confidence=confidence,
-        fault_prob=round(float(probs[0]), 4),
-        normal_prob=round(float(probs[1]), 4),
-        latency_ms=latency_ms,
-        timestamp=datetime.utcnow().isoformat(),
-        explanation=explanation
-    )
-
-@app.post("/export/onnx", tags=["Admin"])
-def export_onnx():
-    """Export current PyTorch model to ONNX and reload the session"""
-    try:
-        from model.export_onnx import export_to_onnx, benchmark_pytorch_vs_onnx
-        export_to_onnx()
-        load_onnx_session()
-        benchmark = benchmark_pytorch_vs_onnx(n_runs=20)
-        return {
-            "status":   "exported",
-            "path":     ONNX_PATH,
-            "speedup":  round(benchmark["speedup"], 2),
-            "pytorch_mean_ms": round(benchmark["pytorch"]["mean"], 2),
-            "onnx_mean_ms":    round(benchmark["onnx"]["mean"], 2),
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/reload", tags=["Admin"])
-def reload_model():
-    """Hot-reload the model checkpoint without restarting the server"""
-    try:
-        load_model()
-        return {"status": "reloaded", "timestamp": datetime.utcnow().isoformat()}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/ui", tags=["UI"])
-def ui(request: Request):
-    return templates.TemplateResponse(
-        request=request,
-        name="index.html"
-    )
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("api:app", host="0.0.0.0", port=8000)

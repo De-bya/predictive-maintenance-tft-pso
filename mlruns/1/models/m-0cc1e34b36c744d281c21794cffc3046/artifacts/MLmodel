@@ -1,0 +1,23 @@
+artifact_path: file:///C:/Users/debya/Desktop/predictive-maintenance-tft-pso/mlruns/1/models/m-0cc1e34b36c744d281c21794cffc3046/artifacts
+flavors:
+  python_function:
+    config:
+      device: null
+    data: data
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.pytorch
+    pickle_module_name: mlflow.pytorch.pickle_module
+    python_version: 3.10.10
+  pytorch:
+    code: null
+    model_data: data
+    pytorch_version: 2.12.0+cpu
+mlflow_version: 3.13.0
+model_id: m-0cc1e34b36c744d281c21794cffc3046
+model_size_bytes: 1939371
+model_uuid: m-0cc1e34b36c744d281c21794cffc3046
+prompts: null
+run_id: a5b580cc3ce0445094ef1501119a3db5
+utc_time_created: '2026-10-01 12:48:10.244925'

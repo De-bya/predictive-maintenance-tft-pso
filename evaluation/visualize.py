@@ -2,9 +2,10 @@
 Generates 4 key plots:
 1. Confusion matrix
 2. ROC curve
-3. PSO convergence
-4. Training loss curve
+3. PSO convergence (from data/processed/pso_history.json)
+4. Accuracy comparison with the paper's baselines (paper Figure 3)
 """
+import json
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -13,21 +14,14 @@ import os, sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from sklearn.metrics import confusion_matrix, roc_curve, auc
-from model.tft import TemporalFusionTransformer
+from mlops.registry import load_trained_model
 
 os.makedirs("evaluation/plots", exist_ok=True)
 
 def load_model_and_data():
     X_test = np.load("data/processed/X_test.npy")
     y_test = np.load("data/processed/y_test.npy")
-    model  = TemporalFusionTransformer(
-        input_dim=68, hidden_dim=128,
-        num_heads=8, dropout=0.068, num_classes=2
-    )
-    model.load_state_dict(
-        torch.load("data/processed/best_model.pt", map_location="cpu")
-    )
-    model.eval()
+    model, _ = load_trained_model()
     with torch.no_grad():
         logits = model(torch.tensor(X_test, dtype=torch.float32))
         probs  = torch.softmax(logits, dim=1)[:, 1].numpy()
@@ -65,28 +59,27 @@ def plot_roc_curve(ax, y_true, y_prob):
     ax.grid(True, alpha=0.3)
 
 def plot_pso_convergence(ax):
-    # Actual PSO results from our run
-    iters = list(range(1, 21))
-    best_acc = [
-        98.26, 98.84, 98.84, 99.13, 99.13, 99.13, 99.13, 99.13,
-        99.13, 99.13, 99.13, 99.13, 99.13, 99.13, 99.13, 99.13,
-        99.13, 99.42, 99.42, 99.42
-    ]
+    # Best validation accuracy per iteration, saved by model/pso.py
+    with open("data/processed/pso_history.json") as f:
+        best_acc = json.load(f)
+    iters = list(range(1, len(best_acc) + 1))
     ax.plot(iters, best_acc, "o-", color="#1ABC9C", lw=2.5, markersize=6,
             markerfacecolor="white", markeredgewidth=2)
     ax.axhline(y=99.2, color="#E74C3C", linestyle="--", lw=1.5,
                label="Paper target (99.2%)")
-    ax.fill_between(iters, [98.0]*20, best_acc, alpha=0.15, color="#1ABC9C")
+    ax.fill_between(iters, [min(best_acc)]*len(iters), best_acc, alpha=0.15, color="#1ABC9C")
     ax.set_xlabel("PSO Iteration", fontsize=12, fontweight="bold")
     ax.set_ylabel("Best Validation Accuracy (%)", fontsize=12, fontweight="bold")
     ax.set_title("PSO Convergence", fontsize=14, fontweight="bold", pad=12)
-    ax.set_ylim([97.5, 100])
     ax.legend(fontsize=11)
     ax.grid(True, alpha=0.3)
 
 def plot_metrics_comparison(ax):
+    # Baseline accuracies are the values reported in the paper (Figure 3)
+    with open("data/processed/metrics.json") as f:
+        ours = json.load(f)["Accuracy (%)"]
     models  = ["NB+MC", "AE+GB", "RF+IoT", "TFT+PSO\n(paper)", "TFT+PSO\n(ours)"]
-    accs    = [83.97,   95.00,   96.80,    99.20,              96.50]
+    accs    = [83.97,   95.00,   96.80,    99.20,              ours]
     colors  = ["#BDC3C7","#85C1E9","#5DADE2","#1ABC9C",        "#2E75B6"]
     bars = ax.bar(models, accs, color=colors, edgecolor="white",
                   linewidth=1.5, width=0.6)
